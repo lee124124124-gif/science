@@ -73,7 +73,7 @@
 
     <div class="admin-grid">
       <div class="admin-upload">
-        <h2>새 시뮬레이션 업로드</h2>
+        <h2 id="uploadFormTitle">새 시뮬레이션 업로드</h2>
         <form id="uploadForm">
           <label>
             제목 <span class="required">*</span>
@@ -119,8 +119,11 @@
             </label>
           </div>
 
-          <p class="hint">미리보기 이미지는 업로드 후 시뮬레이션 실행 화면을 자동으로 캡처해서 만들어집니다.</p>
-          <button type="submit" class="btn btn-primary btn-block">업로드</button>
+          <p class="hint" id="uploadContentHint">미리보기 이미지는 업로드 후 시뮬레이션 실행 화면을 자동으로 캡처해서 만들어집니다.</p>
+          <div class="upload-form-actions">
+            <button type="submit" class="btn btn-primary btn-block" id="uploadSubmitBtn">업로드</button>
+            <button type="button" class="btn btn-block" id="uploadCancelBtn" hidden>취소</button>
+          </div>
         </form>
       </div>
       <div class="admin-list">

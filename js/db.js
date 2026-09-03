@@ -83,6 +83,23 @@ async function getSimulation(id) {
   });
 }
 
+async function updateSimulation(id, updates) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('simulations', 'readwrite');
+    const store = tx.objectStore('simulations');
+    const getReq = store.get(id);
+    getReq.onsuccess = () => {
+      const doc = getReq.result;
+      if (!doc) return;
+      Object.assign(doc, updates);
+      store.put(doc);
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function deleteSimulation(id) {
   const db = await openDB();
   return new Promise((resolve, reject) => {

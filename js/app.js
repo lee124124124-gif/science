@@ -21,6 +21,10 @@
   const passwordChangeMsg = document.getElementById('passwordChangeMsg');
 
   const uploadForm = document.getElementById('uploadForm');
+  const uploadFormTitle = document.getElementById('uploadFormTitle');
+  const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
+  const uploadCancelBtn = document.getElementById('uploadCancelBtn');
+  const uploadContentHint = document.getElementById('uploadContentHint');
   const fileInputGroup = document.getElementById('fileInputGroup');
   const codeInputGroup = document.getElementById('codeInputGroup');
 
@@ -39,6 +43,7 @@
   let renderToken = 0;
   let editingKey = null;
   let expandedFeedbackId = null;
+  let editingSimId = null;
 
   const LEVEL_ICON = { middle: '🧪', high: '🧬' };
   const ADMIN_PW_KEY = 'scienceSimHub_adminPasswordHash';
@@ -429,21 +434,69 @@
               <strong>${escapeHtml(sim.title)}</strong>
               <span class="admin-sim-date">${formatDate(sim.createdAt)}</span>
             </div>
-            <button type="button" class="btn btn-danger btn-sm admin-delete-btn">삭제</button>
+            <div class="admin-sim-actions">
+              <button type="button" class="btn btn-sm admin-edit-btn">수정</button>
+              <button type="button" class="btn btn-danger btn-sm admin-delete-btn">삭제</button>
+            </div>
           </li>
         `).join('')
       : '<li class="feedback-empty">아직 업로드된 시뮬레이션이 없습니다.</li>';
   }
 
   adminSimList.addEventListener('click', async (e) => {
-    const btn = e.target.closest('.admin-delete-btn');
-    if (!btn) return;
-    const li = btn.closest('li[data-id]');
+    const li = e.target.closest('li[data-id]');
+    if (!li) return;
     const id = li.dataset.id;
-    if (!confirm('이 시뮬레이션을 삭제하시겠습니까? 관련된 건의사항도 함께 삭제됩니다.')) return;
-    await deleteSimulation(id);
-    renderAdminList();
+
+    if (e.target.closest('.admin-delete-btn')) {
+      if (!confirm('이 시뮬레이션을 삭제하시겠습니까? 관련된 건의사항도 함께 삭제됩니다.')) return;
+      await deleteSimulation(id);
+      if (editingSimId === id) cancelSimEdit();
+      renderAdminList();
+      return;
+    }
+
+    if (e.target.closest('.admin-edit-btn')) {
+      const sim = await getSimulation(id);
+      if (!sim) return;
+      startSimEdit(sim);
+    }
   });
+
+  // --- 관리자: 업로드된 시뮬레이션 수정 ---
+  // 업로드 폼을 그대로 재사용한다 — 관리자가 "수정" 버튼을 누르면 그 시뮬레이션의
+  // 기존 값으로 폼을 채우고, 제출 시 새로 추가하는 대신 기존 문서를 갱신한다.
+  // HTML 파일/코드는 다시 첨부하지 않아도 되며, 비워두면 기존 내용을 그대로 유지한다.
+  function startSimEdit(sim) {
+    editingSimId = sim.id;
+    document.getElementById('simTitle').value = sim.title;
+    document.getElementById('simCategory').value = sim.category;
+    document.getElementById('simDesc').value = sim.description || '';
+    document.getElementById('simFile').value = '';
+    document.getElementById('simCode').value = '';
+    uploadForm.querySelector('input[name="uploadMode"][value="file"]').checked = true;
+    fileInputGroup.hidden = false;
+    codeInputGroup.hidden = true;
+
+    uploadFormTitle.textContent = '시뮬레이션 수정';
+    uploadSubmitBtn.textContent = '수정 완료';
+    uploadCancelBtn.hidden = false;
+    uploadContentHint.textContent = 'HTML 파일/코드를 다시 첨부하면 실행 내용과 미리보기가 새로 바뀝니다. 비워두면 기존 내용이 그대로 유지됩니다.';
+    uploadForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function cancelSimEdit() {
+    editingSimId = null;
+    uploadForm.reset();
+    fileInputGroup.hidden = false;
+    codeInputGroup.hidden = true;
+    uploadFormTitle.textContent = '새 시뮬레이션 업로드';
+    uploadSubmitBtn.textContent = '업로드';
+    uploadCancelBtn.hidden = true;
+    uploadContentHint.textContent = '미리보기 이미지는 업로드 후 시뮬레이션 실행 화면을 자동으로 캡처해서 만들어집니다.';
+  }
+
+  uploadCancelBtn.addEventListener('click', cancelSimEdit);
 
   // --- 관리자: 건의사항/답글 현황 ---
   // 모든 의견(건의사항 탭 + 시뮬레이션별)을 한곳에 모아 답글 개수를 보여주고,
@@ -570,45 +623,57 @@
     const htmlFile = document.getElementById('simFile').files[0];
     const codeText = document.getElementById('simCode').value.trim();
 
-    if (mode === 'file' && !htmlFile) {
-      alert('HTML 파일을 선택해주세요.');
-      return;
-    }
-    if (mode === 'code' && !codeText) {
-      alert('HTML 코드를 입력해주세요.');
+    const hasNewContent = mode === 'file' ? !!htmlFile : !!codeText;
+
+    if (!editingSimId && !hasNewContent) {
+      alert(mode === 'file' ? 'HTML 파일을 선택해주세요.' : 'HTML 코드를 입력해주세요.');
       return;
     }
 
-    const submitBtn = uploadForm.querySelector('button[type="submit"]');
+    const submitBtn = uploadSubmitBtn;
     submitBtn.disabled = true;
-    submitBtn.textContent = '업로드 중...';
 
     try {
-      const htmlContent = mode === 'file' ? await readFileAsText(htmlFile) : codeText;
+      let htmlContent = null;
+      let thumbnail = null;
 
-      submitBtn.textContent = '미리보기 생성 중...';
-      const thumbnail = await captureThumbnail(htmlContent);
+      if (hasNewContent) {
+        htmlContent = mode === 'file' ? await readFileAsText(htmlFile) : codeText;
+        submitBtn.textContent = '미리보기 생성 중...';
+        thumbnail = await captureThumbnail(htmlContent);
+      }
 
-      await addSimulation({
-        id: crypto.randomUUID(),
-        title,
-        level,
-        category,
-        description,
-        htmlContent,
-        thumbnail,
-        createdAt: Date.now(),
-      });
-
-      uploadForm.reset();
-      fileInputGroup.hidden = false;
-      codeInputGroup.hidden = true;
+      if (editingSimId) {
+        submitBtn.textContent = '수정 중...';
+        const updates = { title, level, category, description };
+        if (hasNewContent) {
+          updates.htmlContent = htmlContent;
+          updates.thumbnail = thumbnail;
+        }
+        await updateSimulation(editingSimId, updates);
+        cancelSimEdit();
+      } else {
+        submitBtn.textContent = '업로드 중...';
+        await addSimulation({
+          id: crypto.randomUUID(),
+          title,
+          level,
+          category,
+          description,
+          htmlContent,
+          thumbnail,
+          createdAt: Date.now(),
+        });
+        uploadForm.reset();
+        fileInputGroup.hidden = false;
+        codeInputGroup.hidden = true;
+      }
       renderAdminList();
     } catch (err) {
-      alert('업로드 중 오류가 발생했습니다: ' + err.message);
+      alert((editingSimId ? '수정' : '업로드') + ' 중 오류가 발생했습니다: ' + err.message);
     } finally {
       submitBtn.disabled = false;
-      submitBtn.textContent = '업로드';
+      submitBtn.textContent = editingSimId ? '수정 완료' : '업로드';
     }
   });
 
