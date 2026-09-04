@@ -1,242 +1,137 @@
-// IndexedDB 저장소: 업로드된 시뮬레이션과 건의사항을 브라우저에 영구 저장한다.
-// (백엔드 서버 없이 동작하므로, 데이터는 업로드한 브라우저/기기에만 저장된다.)
+// 공유 저장소(Firestore): 업로드된 시뮬레이션과 건의사항을 모든 기기가 함께 보도록 저장한다.
+// (예전에는 브라우저의 IndexedDB에만 저장해서 기기마다 데이터가 따로 보였다 — 그 문제를
+// 해결하기 위해 Firebase Firestore를 사용한다. Storage는 유료(Blaze) 요금제가 필요해서
+// 쓰지 않고, HTML 코드와 미리보기 이미지도 전부 Firestore 문서 안에 텍스트로 저장한다.)
 
-const DB_NAME = 'scienceSimHub';
-const DB_VERSION = 1;
+const firebaseConfig = {
+  apiKey: "AIzaSyAh3IBvMWVD32NiRNgSv6K_Bvdw35CVzDA",
+  authDomain: "science-ffff6.firebaseapp.com",
+  projectId: "science-ffff6",
+  storageBucket: "science-ffff6.firebasestorage.app",
+  messagingSenderId: "806373880729",
+  appId: "1:806373880729:web:4b0465a328abaa5001d908"
+};
 
-let dbConnectionPromise = null;
+firebase.initializeApp(firebaseConfig);
+const fsdb = firebase.firestore();
 
-// 커넥션을 재사용하지 않고 매번 새로 열면(특히 헤드리스/느린 환경에서) 두 번째 연결이
-// 첫 연결의 업그레이드 트랜잭션 뒤에서 멈춰버리는 경우가 있어, 하나의 연결을 캐시해 공유한다.
-// 다만 아주 드물게 open() 요청 자체가 어떤 이벤트도 발생시키지 않고 멈추는 경우가 있어(브라우저 쪽
-// 문제로 보인다), 일정 시간 안에 열리지 않으면 캐시를 비우고 다음 호출에서 다시 시도할 수 있게 한다.
-function openDB() {
-  if (dbConnectionPromise) return dbConnectionPromise;
+const SIMULATIONS_COL = 'simulations';
+const FEEDBACK_COL = 'feedback';
+const SETTINGS_COL = 'settings';
 
-  dbConnectionPromise = new Promise((resolve, reject) => {
-    let settled = false;
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      dbConnectionPromise = null;
-      reject(new Error('indexedDB.open() timed out'));
-    }, 5000);
-
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains('simulations')) {
-        const store = db.createObjectStore('simulations', { keyPath: 'id' });
-        store.createIndex('level', 'level', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('feedback')) {
-        const fb = db.createObjectStore('feedback', { keyPath: 'id', autoIncrement: true });
-        fb.createIndex('simulationId', 'simulationId', { unique: false });
-      }
-    };
-    req.onsuccess = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      resolve(req.result);
-    };
-    req.onerror = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      dbConnectionPromise = null;
-      reject(req.error);
-    };
-  });
-
-  return dbConnectionPromise;
+// Firestore 문서 하나의 용량 제한은 약 1MiB(1,048,576바이트)다. 시뮬레이션 HTML 코드와
+// 미리보기 이미지를 파일 저장소 없이 문서 안에 그대로 넣기 때문에, 여유를 두고 900KB를
+// 넘으면 업로드 전에 미리 막고 안내 메시지를 보여준다.
+const MAX_DOC_BYTES = 900 * 1024;
+function assertSizeOk(obj) {
+  const bytes = new Blob([JSON.stringify(obj)]).size;
+  if (bytes > MAX_DOC_BYTES) {
+    const kb = Math.round(bytes / 1024);
+    throw new Error(`시뮬레이션 파일이 너무 큽니다(약 ${kb}KB, 최대 약 900KB). 더 가벼운 파일로 시도해주세요.`);
+  }
 }
 
 async function addSimulation(sim) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('simulations', 'readwrite');
-    tx.objectStore('simulations').add(sim);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  assertSizeOk(sim);
+  const { id, ...data } = sim;
+  await fsdb.collection(SIMULATIONS_COL).doc(id).set(data);
 }
 
 async function getAllSimulations() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('simulations', 'readonly');
-    const req = tx.objectStore('simulations').getAll();
-    req.onsuccess = () => resolve(req.result.sort((a, b) => b.createdAt - a.createdAt));
-    req.onerror = () => reject(req.error);
-  });
+  const snap = await fsdb.collection(SIMULATIONS_COL).orderBy('createdAt', 'desc').get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
 async function getSimulation(id) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('simulations', 'readonly');
-    const req = tx.objectStore('simulations').get(id);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  const doc = await fsdb.collection(SIMULATIONS_COL).doc(id).get();
+  return doc.exists ? { id: doc.id, ...doc.data() } : undefined;
 }
 
 async function updateSimulation(id, updates) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('simulations', 'readwrite');
-    const store = tx.objectStore('simulations');
-    const getReq = store.get(id);
-    getReq.onsuccess = () => {
-      const doc = getReq.result;
-      if (!doc) return;
-      Object.assign(doc, updates);
-      store.put(doc);
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  assertSizeOk(updates);
+  await fsdb.collection(SIMULATIONS_COL).doc(id).update(updates);
 }
 
 async function deleteSimulation(id) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(['simulations', 'feedback'], 'readwrite');
-    tx.objectStore('simulations').delete(id);
-    const fbIndex = tx.objectStore('feedback').index('simulationId');
-    const cursorReq = fbIndex.openCursor(IDBKeyRange.only(id));
-    cursorReq.onsuccess = () => {
-      const cursor = cursorReq.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-      }
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  const batch = fsdb.batch();
+  batch.delete(fsdb.collection(SIMULATIONS_COL).doc(id));
+  const relatedFeedback = await fsdb.collection(FEEDBACK_COL).where('simulationId', '==', id).get();
+  relatedFeedback.forEach(doc => batch.delete(doc.ref));
+  await batch.commit();
 }
 
 async function addFeedback(feedback) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    tx.objectStore('feedback').add(feedback);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await fsdb.collection(FEEDBACK_COL).add(feedback);
 }
 
 async function getFeedbackForSim(simulationId) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readonly');
-    const index = tx.objectStore('feedback').index('simulationId');
-    const req = index.getAll(IDBKeyRange.only(simulationId));
-    req.onsuccess = () => resolve(req.result.sort((a, b) => b.createdAt - a.createdAt));
-    req.onerror = () => reject(req.error);
-  });
+  const snap = await fsdb.collection(FEEDBACK_COL).where('simulationId', '==', simulationId).get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAt - a.createdAt);
 }
 
 async function getGeneralFeedback() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readonly');
-    const req = tx.objectStore('feedback').getAll();
-    req.onsuccess = () => resolve(
-      req.result.filter(f => !f.simulationId).sort((a, b) => b.createdAt - a.createdAt)
-    );
-    req.onerror = () => reject(req.error);
-  });
+  const snap = await fsdb.collection(FEEDBACK_COL).get();
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(f => !f.simulationId)
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 async function getAllFeedback() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readonly');
-    const req = tx.objectStore('feedback').getAll();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  const snap = await fsdb.collection(FEEDBACK_COL).get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
 async function addReply(feedbackId, message, byAdmin) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    const store = tx.objectStore('feedback');
-    const getReq = store.get(feedbackId);
-    getReq.onsuccess = () => {
-      const doc = getReq.result;
-      if (!doc) return;
-      doc.replies = doc.replies || [];
-      doc.replies.push({ message, createdAt: Date.now(), byAdmin: !!byAdmin });
-      store.put(doc);
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  const ref = fsdb.collection(FEEDBACK_COL).doc(feedbackId);
+  await fsdb.runTransaction(async (tx) => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) return;
+    const replies = doc.data().replies || [];
+    replies.push({ message, createdAt: Date.now(), byAdmin: !!byAdmin });
+    tx.update(ref, { replies });
   });
 }
 
 async function updateFeedback(id, message) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    const store = tx.objectStore('feedback');
-    const getReq = store.get(id);
-    getReq.onsuccess = () => {
-      const doc = getReq.result;
-      if (!doc) return;
-      doc.message = message;
-      store.put(doc);
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await fsdb.collection(FEEDBACK_COL).doc(id).update({ message });
 }
 
 async function deleteFeedback(id) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    tx.objectStore('feedback').delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await fsdb.collection(FEEDBACK_COL).doc(id).delete();
 }
 
 async function updateReply(feedbackId, index, message) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    const store = tx.objectStore('feedback');
-    const getReq = store.get(feedbackId);
-    getReq.onsuccess = () => {
-      const doc = getReq.result;
-      if (!doc || !doc.replies || !doc.replies[index]) return;
-      doc.replies[index].message = message;
-      store.put(doc);
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  const ref = fsdb.collection(FEEDBACK_COL).doc(feedbackId);
+  await fsdb.runTransaction(async (tx) => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) return;
+    const replies = doc.data().replies || [];
+    if (!replies[index]) return;
+    replies[index] = { ...replies[index], message };
+    tx.update(ref, { replies });
   });
 }
 
 async function deleteReply(feedbackId, index) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('feedback', 'readwrite');
-    const store = tx.objectStore('feedback');
-    const getReq = store.get(feedbackId);
-    getReq.onsuccess = () => {
-      const doc = getReq.result;
-      if (!doc || !doc.replies) return;
-      doc.replies.splice(index, 1);
-      store.put(doc);
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  const ref = fsdb.collection(FEEDBACK_COL).doc(feedbackId);
+  await fsdb.runTransaction(async (tx) => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) return;
+    const replies = (doc.data().replies || []).slice();
+    replies.splice(index, 1);
+    tx.update(ref, { replies });
   });
+}
+
+// --- 관리자 비밀번호 (모든 기기가 공유) ---
+// 예전에는 localStorage에 저장해서 기기마다 비밀번호가 따로 놀았다 — 한 PC에서 바꾸면
+// 다른 PC에서는 여전히 옛 비밀번호(또는 기본값)로 로그인되는 문제가 있었다.
+async function getAdminPasswordHash() {
+  const doc = await fsdb.collection(SETTINGS_COL).doc('admin').get();
+  return doc.exists ? doc.data().passwordHash : null;
+}
+
+async function setAdminPasswordHash(hash) {
+  await fsdb.collection(SETTINGS_COL).doc('admin').set({ passwordHash: hash }, { merge: true });
 }

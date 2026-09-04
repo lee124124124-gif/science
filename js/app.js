@@ -46,7 +46,6 @@
   let editingSimId = null;
 
   const LEVEL_ICON = { middle: '🧪', high: '🧬' };
-  const ADMIN_PW_KEY = 'scienceSimHub_adminPasswordHash';
   const DEFAULT_PASSWORD = 'qwer1234';
   const AUTHOR_TOKEN_KEY = 'scienceSimHub_authorToken';
   const LAST_TAB_KEY = 'scienceSimHub_lastTab';
@@ -114,8 +113,9 @@
   }
 
   async function ensurePasswordInitialized() {
-    if (!localStorage.getItem(ADMIN_PW_KEY)) {
-      localStorage.setItem(ADMIN_PW_KEY, await sha256(DEFAULT_PASSWORD));
+    const existing = await getAdminPasswordHash();
+    if (!existing) {
+      await setAdminPasswordHash(await sha256(DEFAULT_PASSWORD));
     }
   }
 
@@ -299,9 +299,9 @@
       const isReply = delBtn.dataset.kind === 'reply';
       if (!confirm(isReply ? '이 답글을 삭제하시겠습니까?' : '이 의견을 삭제하시겠습니까? 답글도 함께 삭제됩니다.')) return;
       if (isReply) {
-        await deleteReply(Number(delBtn.dataset.id), Number(delBtn.dataset.index));
+        await deleteReply(delBtn.dataset.id, Number(delBtn.dataset.index));
       } else {
-        await deleteFeedback(Number(delBtn.dataset.id));
+        await deleteFeedback(delBtn.dataset.id);
       }
       refreshFn();
     } else if (cancelBtn) {
@@ -316,7 +316,7 @@
 
     if (replyForm) {
       e.preventDefault();
-      const id = Number(replyForm.dataset.id);
+      const id = replyForm.dataset.id;
       const message = replyForm.querySelector('textarea').value.trim();
       if (!message) return;
       blurActiveInput();
@@ -328,9 +328,9 @@
       if (!message) return;
       blurActiveInput();
       if (edit.dataset.kind === 'feedback') {
-        await updateFeedback(Number(edit.dataset.id), message);
+        await updateFeedback(edit.dataset.id, message);
       } else {
-        await updateReply(Number(edit.dataset.id), Number(edit.dataset.index), message);
+        await updateReply(edit.dataset.id, Number(edit.dataset.index), message);
       }
       editingKey = null;
       refreshFn();
@@ -380,7 +380,7 @@
   adminLoginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const hash = await sha256(adminPasswordInput.value);
-    const stored = localStorage.getItem(ADMIN_PW_KEY);
+    const stored = await getAdminPasswordHash();
     if (hash === stored) {
       isAdminUnlocked = true;
       renderAdminGate();
@@ -402,7 +402,7 @@
     };
 
     const curHash = await sha256(cur);
-    const stored = localStorage.getItem(ADMIN_PW_KEY);
+    const stored = await getAdminPasswordHash();
     if (curHash !== stored) {
       showMsg('현재 비밀번호가 올바르지 않습니다.', true);
       return;
@@ -416,7 +416,7 @@
       return;
     }
 
-    localStorage.setItem(ADMIN_PW_KEY, await sha256(next));
+    await setAdminPasswordHash(await sha256(next));
     passwordChangeForm.reset();
     showMsg('비밀번호가 변경되었습니다.', false);
   });
@@ -535,7 +535,7 @@
   adminFeedbackList.addEventListener('click', (e) => {
     const summaryBtn = e.target.closest('.admin-feedback-summary');
     if (summaryBtn) {
-      const id = Number(summaryBtn.dataset.id);
+      const id = summaryBtn.dataset.id;
       expandedFeedbackId = expandedFeedbackId === id ? null : id;
       renderAdminFeedbackOverview();
       return;
