@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>예전 데이터 복구 — 재혁쌤의 과학 시뮬레이션 모음</title>
+<style>
+  body {
+    margin: 0;
+    padding: 24px 16px 60px;
+    background: #0b1030;
+    color: #e6e9f5;
+    font-family: "Pretendard", "Malgun Gothic", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .sub { color: #9aa3c7; font-size: 14px; margin: 0 0 22px; }
+  .card {
+    background: #131a45;
+    border: 1px solid #2a3468;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; color: #cdd4f5; }
+  .origin {
+    font-family: monospace;
+    background: #0b1030;
+    border: 1px solid #2a3468;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    word-break: break-all;
+    color: #8fe3b0;
+  }
+  ul.note { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: #9aa3c7; }
+  button {
+    appearance: none;
+    border: 1px solid #4a5bd0;
+    background: linear-gradient(135deg, #5b6ee0, #8a63ff);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    padding: 12px 18px;
+    border-radius: 10px;
+    cursor: pointer;
+    width: 100%;
+  }
+  button:disabled { opacity: 0.55; cursor: default; }
+  #log {
+    margin-top: 16px;
+    background: #080c24;
+    border: 1px solid #2a3468;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-family: monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    min-height: 60px;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  .ok { color: #8fe3b0; }
+  .warn { color: #ffd479; }
+  .err { color: #ff8fa3; }
+  a { color: #9ab0ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>예전 데이터 복구 도구</h1>
+  <p class="sub">브라우저에 남아있는 예전 시뮬레이션·건의사항을 찾아서 공유 저장소(Firestore)로 옮깁니다.</p>
+
+  <div class="card">
+    <h2>1. 주소 확인</h2>
+    <p style="margin:0 0 8px; font-size:14px;">예전 데이터는 <strong>업로드할 때 사용했던 주소에서만</strong> 찾을 수 있습니다. 지금 이 페이지의 주소는:</p>
+    <div class="origin" id="originBox"></div>
+    <ul class="note">
+      <li>예전에 <code>localhost:8080</code>에서 업로드하셨다면, 이 페이지도 <code>localhost:8080/migrate.html</code>로 열어야 합니다.</li>
+      <li>배포된 사이트에서 업로드하셨다면, 그 사이트 주소 뒤에 <code>/migrate.html</code>을 붙여서 열어주세요.</li>
+      <li>업로드할 때 쓰던 <strong>그 PC의 그 브라우저</strong>여야 합니다.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>2. 복구 실행</h2>
+    <p style="margin:0 0 12px; font-size:14px;">아래 버튼을 누르면 예전 데이터를 찾아서 공유 저장소로 올립니다. 여러 번 눌러도 중복 없이 같은 항목을 덮어쓰기만 하므로 안전합니다.</p>
+    <button id="startBtn">예전 데이터 찾아서 복구하기</button>
+    <div id="log">대기 중…</div>
+  </div>
+
+  <p class="sub" style="text-align:center;"><a href="index.html">← 사이트로 돌아가기</a></p>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<script src="js/db.js"></script>
+<script>
+(() => {
+  const OLD_DB_NAME = 'scienceSimHub';
+  const logBox = document.getElementById('log');
+  const startBtn = document.getElementById('startBtn');
+  document.getElementById('originBox').textContent = location.origin + location.pathname;
+
+  let lines = [];
+  function log(text, cls) {
+    lines.push(cls ? `<span class="${cls}">${text}</span>` : text);
+    logBox.innerHTML = lines.join('\n');
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  // 예전 IndexedDB를 연다. 버전을 지정하지 않고 열어서, 이미 있는 DB의 구조를 그대로 읽는다.
+  // (버전을 지정하면 기존 DB와 충돌하거나 불필요한 업그레이드가 일어날 수 있다.)
+  async function openLegacyDb() {
+    if (indexedDB.databases) {
+      try {
+        const list = await indexedDB.databases();
+        if (!list.some(d => d.name === OLD_DB_NAME)) return null;
+      } catch (err) { /* databases()를 못 쓰는 브라우저면 그냥 열어본다 */ }
+    }
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(OLD_DB_NAME);
+      let createdEmpty = false;
+      req.onupgradeneeded = () => { createdEmpty = true; };
+      req.onsuccess = () => resolve(createdEmpty ? null : req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function readAll(db, storeName) {
+    return new Promise((resolve, reject) => {
+      if (!db.objectStoreNames.contains(storeName)) return resolve([]);
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    lines = [];
+    log('예전 데이터를 찾는 중…');
+
+    try {
+      const db = await openLegacyDb();
+      if (!db) {
+        log('이 주소에는 예전 데이터가 없습니다.', 'warn');
+        log('→ 업로드할 때 사용했던 주소/브라우저가 맞는지 확인해주세요.', 'warn');
+        startBtn.disabled = false;
+        return;
+      }
+
+      const [sims, feedback] = await Promise.all([
+        readAll(db, 'simulations'),
+        readAll(db, 'feedback'),
+      ]);
+      log(`찾았습니다 — 시뮬레이션 ${sims.length}개, 의견 ${feedback.length}개`, 'ok');
+
+      if (!sims.length && !feedback.length) {
+        log('옮길 데이터가 없습니다.', 'warn');
+        startBtn.disabled = false;
+        return;
+      }
+
+      let simOk = 0, simFail = 0;
+      for (const sim of sims) {
+        const { id, ...data } = sim;
+        try {
+          await fsdb.collection('simulations').doc(String(id)).set(data);
+          simOk++;
+          log(`  ✔ 시뮬레이션 "${sim.title || id}" 옮김`, 'ok');
+        } catch (err) {
+          simFail++;
+          log(`  ✖ 시뮬레이션 "${sim.title || id}" 실패: ${err.message}`, 'err');
+        }
+      }
+
+      let fbOk = 0, fbFail = 0;
+      for (const f of feedback) {
+        const { id, ...data } = f;
+        try {
+          // 예전 의견은 번호(1, 2, 3…)가 ID였다. 그대로 쓰면 나중에 새로 달리는 의견과
+          // 부딪힐 수 있어서 'legacy-' 를 붙인다. 덕분에 이 도구를 여러 번 실행해도
+          // 같은 의견이 중복 생성되지 않고 덮어쓰기만 된다.
+          await fsdb.collection('feedback').doc('legacy-' + id).set(data);
+          fbOk++;
+        } catch (err) {
+          fbFail++;
+          log(`  ✖ 의견(${id}) 실패: ${err.message}`, 'err');
+        }
+      }
+      if (fbOk) log(`  ✔ 의견 ${fbOk}개 옮김`, 'ok');
+
+      log('');
+      log(`완료: 시뮬레이션 ${simOk}개, 의견 ${fbOk}개를 공유 저장소로 옮겼습니다.`, 'ok');
+      if (simFail || fbFail) {
+        log(`실패: 시뮬레이션 ${simFail}개, 의견 ${fbFail}개 (위 오류 메시지 참고)`, 'err');
+      }
+      log('이제 사이트로 돌아가면 다른 PC에서도 동일하게 보입니다.');
+    } catch (err) {
+      log('오류가 발생했습니다: ' + err.message, 'err');
+    } finally {
+      startBtn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
