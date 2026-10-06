@@ -526,6 +526,20 @@ body {
   box-shadow: 0 0 0 3px rgba(109, 139, 255, 0.2);
 }
 #uploadForm textarea { resize: vertical; }
+
+/* 공유 저장소에 연결하지 못했을 때 화면 맨 위에 띄우는 안내 */
+.db-error-bar {
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+  background: rgba(255, 107, 129, 0.16);
+  border-bottom: 1px solid var(--danger);
+  color: #ffd2da;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 12px 16px;
+  text-align: center;
+}
 .upload-form-actions { display: flex; gap: 8px; }
 .upload-form-actions .btn { flex: 1; }
 

@@ -47,6 +47,8 @@
 
   const LEVEL_ICON = { middle: '🧪', high: '🧬' };
   const DEFAULT_PASSWORD = 'qwer1234';
+  const EMPTY_STATE_TEXT = emptyState.textContent;
+  const LOGIN_ERROR_TEXT = adminLoginError.textContent;
   const AUTHOR_TOKEN_KEY = 'scienceSimHub_authorToken';
   const LAST_TAB_KEY = 'scienceSimHub_lastTab';
   const LAST_CATEGORY_KEY = 'scienceSimHub_lastCategory';
@@ -112,6 +114,32 @@
     return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // --- 데이터 연결 오류 표시 ---
+  // 공유 저장소(Firestore)에 접근하지 못하면 예전에는 화면이 통째로 비어버려서(스크립트가
+  // 거기서 멈춤) 무엇이 잘못됐는지 알 수 없었다. 이제는 원인을 화면 위에 띄워주고,
+  // 나머지 화면은 그대로 그려지도록 한다.
+  let dbErrorShown = false;
+  function isPermissionError(err) {
+    const code = err && (err.code || '');
+    const msg = (err && err.message) || '';
+    return code === 'permission-denied' || /permission|insufficient/i.test(msg);
+  }
+
+  function reportDbError(err) {
+    console.error('[데이터 연결 오류]', err);
+    if (dbErrorShown) return;
+    dbErrorShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'db-error-bar';
+    bar.textContent = isPermissionError(err)
+      ? '⚠️ 데이터베이스 접근 권한이 없습니다. Firebase 콘솔 → Firestore Database → "규칙(Rules)" 탭에서 접근 규칙을 게시해주세요.'
+      : '⚠️ 데이터베이스에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 새로고침해주세요.';
+    document.body.prepend(bar);
+  }
+
+  // 위에서 미처 감싸지 못한 곳에서 오류가 나더라도 사용자가 원인을 알 수 있도록 하는 안전망.
+  window.addEventListener('unhandledrejection', (e) => reportDbError(e.reason));
+
   async function ensurePasswordInitialized() {
     const existing = await getAdminPasswordHash();
     if (!existing) {
@@ -124,12 +152,24 @@
   // 호출 시점의 renderToken을 기억해두고 그 사이 다른 탭으로 바뀌었으면 그리지 않는다.
   async function renderGrid() {
     const myToken = renderToken;
-    const all = await getAllSimulations();
+    let all;
+    try {
+      all = await getAllSimulations();
+    } catch (err) {
+      reportDbError(err);
+      if (myToken !== renderToken) return;
+      grid.innerHTML = '';
+      grid.hidden = false;
+      emptyState.textContent = '시뮬레이션 목록을 불러오지 못했습니다. 화면 위쪽 안내를 확인해주세요.';
+      emptyState.hidden = false;
+      return;
+    }
     if (myToken !== renderToken) return;
     const list = all.filter(s => s.category === currentCategory);
 
     grid.innerHTML = '';
     grid.hidden = false;
+    emptyState.textContent = EMPTY_STATE_TEXT;
     emptyState.hidden = list.length > 0;
 
     for (const sim of list) {
@@ -340,7 +380,15 @@
   // --- 건의사항 탭 (전체 공통 의견) ---
   async function renderFeedbackPage() {
     const myToken = renderToken;
-    const list = await getGeneralFeedback();
+    let list;
+    try {
+      list = await getGeneralFeedback();
+    } catch (err) {
+      reportDbError(err);
+      if (myToken !== renderToken) return;
+      feedbackPageList.innerHTML = '<li class="feedback-empty">의견을 불러오지 못했습니다.</li>';
+      return;
+    }
     if (myToken !== renderToken) return;
     feedbackPageList.innerHTML = list.length
       ? list.map(renderReplyBlock).join('')
@@ -380,7 +428,16 @@
   adminLoginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const hash = await sha256(adminPasswordInput.value);
-    const stored = await getAdminPasswordHash();
+    let stored;
+    try {
+      stored = await getAdminPasswordHash();
+    } catch (err) {
+      reportDbError(err);
+      adminLoginError.textContent = '데이터베이스에 연결하지 못해 로그인할 수 없습니다. 화면 위쪽 안내를 확인해주세요.';
+      adminLoginError.hidden = false;
+      return;
+    }
+    adminLoginError.textContent = LOGIN_ERROR_TEXT;
     if (hash === stored) {
       isAdminUnlocked = true;
       renderAdminGate();
@@ -424,7 +481,15 @@
   // --- 관리자: 시뮬레이션 목록 관리 ---
   async function renderAdminList() {
     const myToken = renderToken;
-    const all = await getAllSimulations();
+    let all;
+    try {
+      all = await getAllSimulations();
+    } catch (err) {
+      reportDbError(err);
+      if (myToken !== renderToken) return;
+      adminSimList.innerHTML = '<li class="feedback-empty">목록을 불러오지 못했습니다.</li>';
+      return;
+    }
     if (myToken !== renderToken) return;
     adminSimList.innerHTML = all.length
       ? all.map(sim => `
@@ -503,7 +568,15 @@
   // 클릭하면 펼쳐져서 그 자리에서 바로 답글을 달거나 관리할 수 있다.
   async function renderAdminFeedbackOverview() {
     const myToken = renderToken;
-    const [allFeedback, allSims] = await Promise.all([getAllFeedback(), getAllSimulations()]);
+    let allFeedback, allSims;
+    try {
+      [allFeedback, allSims] = await Promise.all([getAllFeedback(), getAllSimulations()]);
+    } catch (err) {
+      reportDbError(err);
+      if (myToken !== renderToken) return;
+      adminFeedbackList.innerHTML = '<li class="feedback-empty">의견을 불러오지 못했습니다.</li>';
+      return;
+    }
     if (myToken !== renderToken) return;
 
     const simTitleById = {};
@@ -718,7 +791,14 @@
   }
 
   async function openViewer(id) {
-    const sim = await getSimulation(id);
+    let sim;
+    try {
+      sim = await getSimulation(id);
+    } catch (err) {
+      reportDbError(err);
+      localStorage.removeItem(LAST_SIM_KEY);
+      return;
+    }
     if (!sim) {
       localStorage.removeItem(LAST_SIM_KEY);
       return;
@@ -794,7 +874,14 @@
   closeViewerBtn.addEventListener('click', closeViewer);
 
   async function renderFeedbackList(simId) {
-    const list = await getFeedbackForSim(simId);
+    let list;
+    try {
+      list = await getFeedbackForSim(simId);
+    } catch (err) {
+      reportDbError(err);
+      feedbackList.innerHTML = '<li class="feedback-empty">의견을 불러오지 못했습니다.</li>';
+      return;
+    }
     feedbackList.innerHTML = list.length
       ? list.map(renderReplyBlock).join('')
       : '<li class="feedback-empty">아직 등록된 의견이 없습니다.</li>';
@@ -821,7 +908,13 @@
   feedbackList.addEventListener('click', (e) => handleFeedbackAreaClick(() => renderFeedbackList(currentSimId), e));
 
   (async () => {
-    await ensurePasswordInitialized();
+    // 비밀번호 초기화가 실패해도(예: 데이터베이스 접근 권한 없음) 화면 구성은 계속 진행한다.
+    // 예전에는 여기서 오류가 나면 아래 showTab()까지 도달하지 못해 페이지 전체가 비어 보였다.
+    try {
+      await ensurePasswordInitialized();
+    } catch (err) {
+      reportDbError(err);
+    }
 
     const savedCategory = localStorage.getItem(LAST_CATEGORY_KEY);
     if (savedCategory && CATEGORY_LABEL[savedCategory]) {
