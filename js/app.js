@@ -728,13 +728,54 @@
     return total > 0 && (different / total) < 0.02;
   }
 
-  // 미리보기를 만든다. 예전에는 무조건 900ms만 기다렸다가 한 번 찍어서, 외부 라이브러리를
-  // 불러오거나 캔버스에 늦게 그리는 시뮬레이션은 아직 아무것도 없는 화면이 찍히곤 했다
-  // (= 가끔 미리보기가 안 나오는 원인). 이제는 글꼴/이미지 준비를 기다린 뒤, 찍은 그림이
-  // 비어 있으면 시간을 늘려가며 최대 4번까지 다시 찍는다.
-  async function captureThumbnail(htmlContent, onProgress) {
-    if (!(await waitForHtml2Canvas())) return null;
+  // 원본 그림을 카드 비율(800x450)에 맞춰 가운데 정렬해 담는다.
+  function toThumbnailDataUrl(source) {
+    const W = 800, H = 450;
+    const out = document.createElement('canvas');
+    out.width = W;
+    out.height = H;
+    const ctx = out.getContext('2d');
 
+    // 여백은 원본 모서리 색으로 채워서 자연스럽게 이어 보이게 한다.
+    let bg = '#0b1020';
+    try {
+      const px = source.getContext('2d').getImageData(0, 0, 1, 1).data;
+      bg = `rgb(${px[0]}, ${px[1]}, ${px[2]})`;
+    } catch (err) { /* 읽을 수 없으면 기본 배경색 사용 */ }
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const scale = Math.min(W / source.width, H / source.height);
+    const w = source.width * scale;
+    const h = source.height * scale;
+    ctx.drawImage(source, (W - w) / 2, (H - h) / 2, w, h);
+    return out.toDataURL('image/jpeg', 0.72);
+  }
+
+  // 시뮬레이션이 <canvas>에 직접 그리는 경우, 그 캔버스를 그대로 가져오는 것이 가장 정확하다.
+  // html2canvas는 DOM을 다시 그리는 방식이라 최신 CSS 색상 문법(color() 등)을 만나면
+  // 아예 예외를 던지는데(실제로 여러 시뮬레이션이 여기에 걸렸다), 이 방법은 그런 영향을 받지 않는다.
+  function captureFromCanvasElements(doc) {
+    const candidates = Array.from(doc.querySelectorAll('canvas'))
+      .filter(c => c.offsetWidth >= 200 && c.offsetHeight >= 120 && c.width > 0 && c.height > 0)
+      .sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+
+    for (const c of candidates) {
+      try {
+        if (isMostlyBlank(c)) continue;  // 아직 아무것도 안 그려진 캔버스는 건너뛴다
+        return toThumbnailDataUrl(c);
+      } catch (err) {
+        console.warn('캔버스 미리보기 생성 실패', err);
+      }
+    }
+    return null;
+  }
+
+  // 미리보기를 만든다.
+  // 1) 시뮬레이션이 캔버스에 그림을 그렸으면 그 캔버스를 그대로 가져온다 (가장 확실).
+  // 2) 캔버스가 없으면(= DOM/CSS로 만든 시뮬레이션) html2canvas로 화면 전체를 그린다.
+  // 아직 그리기 전일 수 있으므로, 비어 있으면 대기 시간을 늘려가며 여러 번 다시 시도한다.
+  async function captureThumbnail(htmlContent, onProgress) {
     const frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed; left:-10000px; top:0; width:800px; height:450px; border:0; visibility:hidden;';
     frame.sandbox = 'allow-scripts allow-same-origin';
@@ -752,31 +793,45 @@
       await loaded;
       await waitForFrameAssets(frame);
 
+      const html2canvasReady = await waitForHtml2Canvas();
+      let html2canvasBroken = false;  // CSS 파싱 실패 등은 다시 시도해도 똑같이 실패한다
+
       const waits = [500, 1200, 2000, 3000];
       for (let attempt = 0; attempt < waits.length; attempt++) {
         if (onProgress) onProgress(attempt + 1, waits.length);
         await delay(waits[attempt]);
-        try {
-          const doc = frame.contentDocument;
-          if (!doc) return null;
-          const canvas = await html2canvas(doc.documentElement, {
-            width: 800,
-            height: 450,
-            windowWidth: 800,
-            windowHeight: 450,
-            backgroundColor: '#ffffff',
-            scale: 1,        // 고해상도 화면에서 쓸데없이 큰 이미지가 만들어지지 않도록 고정
-            useCORS: true,   // 외부 이미지도 가능하면 제대로 불러온다
-            logging: false,
-          });
-          if (!isMostlyBlank(canvas)) {
-            return canvas.toDataURL('image/jpeg', 0.72);
+
+        const doc = frame.contentDocument;
+        if (!doc) return null;
+
+        const fromCanvas = captureFromCanvasElements(doc);
+        if (fromCanvas) return fromCanvas;
+
+        if (html2canvasReady && !html2canvasBroken) {
+          try {
+            const canvas = await html2canvas(doc.documentElement, {
+              width: 800,
+              height: 450,
+              windowWidth: 800,
+              windowHeight: 450,
+              backgroundColor: '#ffffff',
+              scale: 1,        // 고해상도 화면에서 쓸데없이 큰 이미지가 만들어지지 않도록 고정
+              useCORS: true,   // 외부 이미지도 가능하면 제대로 불러온다
+              logging: false,
+            });
+            if (!isMostlyBlank(canvas)) {
+              return canvas.toDataURL('image/jpeg', 0.72);
+            }
+          } catch (err) {
+            console.warn('html2canvas 캡처 실패', err);
+            // 지원하지 않는 CSS 때문에 터진 경우는 기다려도 달라지지 않으므로 더 시도하지 않는다.
+            if (/pars|color|unsupported|syntax/i.test(err.message || '')) {
+              html2canvasBroken = true;
+            }
           }
-        } catch (err) {
-          console.warn('미리보기 캡처 시도 실패', err);
         }
       }
-      return null; // 끝까지 빈 화면이면 카드에 기본 아이콘을 보여준다
+      return null; // 끝까지 아무것도 못 얻으면 카드에 기본 아이콘을 보여준다
     } finally {
       frame.remove();
     }
@@ -1008,15 +1063,7 @@
   feedbackList.addEventListener('submit', (e) => handleFeedbackAreaSubmit(() => renderFeedbackList(currentSimId), e));
   feedbackList.addEventListener('click', (e) => handleFeedbackAreaClick(() => renderFeedbackList(currentSimId), e));
 
-  (async () => {
-    // 비밀번호 초기화가 실패해도(예: 데이터베이스 접근 권한 없음) 화면 구성은 계속 진행한다.
-    // 예전에는 여기서 오류가 나면 아래 showTab()까지 도달하지 못해 페이지 전체가 비어 보였다.
-    try {
-      await ensurePasswordInitialized();
-    } catch (err) {
-      reportDbError(err);
-    }
-
+  (() => {
     const savedCategory = localStorage.getItem(LAST_CATEGORY_KEY);
     if (savedCategory && CATEGORY_LABEL[savedCategory]) {
       currentCategory = savedCategory;
@@ -1028,7 +1075,12 @@
     // 새로고침 직전에 열려있던 시뮬레이션이 있으면 그대로 다시 열어준다.
     const savedSimId = localStorage.getItem(LAST_SIM_KEY);
     if (savedSimId) {
-      await openViewer(savedSimId);
+      openViewer(savedSimId);
     }
+
+    // 관리자 비밀번호 준비는 화면을 다 그린 뒤 뒤에서 처리한다. 예전에는 이 네트워크
+    // 요청을 기다린 다음에야 화면을 그려서, 응답이 느리거나 막히면 페이지 전체가
+    // 빈 화면으로 남았다.
+    ensurePasswordInitialized().catch(reportDbError);
   })();
 })();
