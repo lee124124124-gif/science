@@ -406,6 +406,14 @@ body {
   gap: 6px;
   flex-shrink: 0;
 }
+.admin-sim-warn {
+  font-size: 12px;
+  color: var(--danger);
+  border: 1px solid rgba(255, 107, 129, 0.4);
+  background: rgba(255, 107, 129, 0.1);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
 .btn-sm {
   padding: 6px 12px;
   font-size: 13px;

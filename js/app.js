@@ -497,9 +497,11 @@
             <div class="admin-sim-info">
               <span class="level-badge">${CATEGORY_LABEL[sim.category]}</span>
               <strong>${escapeHtml(sim.title)}</strong>
+              ${sim.thumbnail ? '' : '<span class="admin-sim-warn">미리보기 없음</span>'}
               <span class="admin-sim-date">${formatDate(sim.createdAt)}</span>
             </div>
             <div class="admin-sim-actions">
+              <button type="button" class="btn btn-sm admin-thumb-btn">미리보기 다시 만들기</button>
               <button type="button" class="btn btn-sm admin-edit-btn">수정</button>
               <button type="button" class="btn btn-danger btn-sm admin-delete-btn">삭제</button>
             </div>
@@ -525,6 +527,34 @@
       const sim = await getSimulation(id);
       if (!sim) return;
       startSimEdit(sim);
+      return;
+    }
+
+    // 미리보기만 다시 만든다 — 시뮬레이션 내용은 이미 저장되어 있으므로 파일을 다시
+    // 첨부할 필요가 없다. 캡처가 한 번 실패했을 때 여기서 바로 재시도할 수 있다.
+    const thumbBtn = e.target.closest('.admin-thumb-btn');
+    if (thumbBtn) {
+      const originalText = thumbBtn.textContent;
+      thumbBtn.disabled = true;
+      try {
+        const sim = await getSimulation(id);
+        if (!sim) return;
+        const thumbnail = await captureThumbnail(sim.htmlContent, (step, total) => {
+          thumbBtn.textContent = `만드는 중... (${step}/${total})`;
+        });
+        if (!thumbnail) {
+          alert('미리보기를 만들지 못했습니다. 시뮬레이션이 화면에 아무것도 그리지 않거나, 불러오는 데 너무 오래 걸리는 경우일 수 있습니다.');
+          return;
+        }
+        await updateSimulation(id, { thumbnail });
+        renderAdminList();
+      } catch (err) {
+        reportDbError(err);
+        alert('미리보기를 저장하지 못했습니다: ' + err.message);
+      } finally {
+        thumbBtn.disabled = false;
+        thumbBtn.textContent = originalText;
+      }
     }
   });
 
@@ -636,53 +666,120 @@
   }
 
   // --- 업로드된 HTML을 오프스크린 iframe에 렌더링해 미리보기 이미지를 자동 캡처 ---
-  function captureThumbnail(htmlContent) {
+  const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // html2canvas는 defer로 불러오므로, 페이지를 열자마자 업로드하면 아직 준비가 안 됐을 수 있다.
+  function waitForHtml2Canvas(timeout = 5000) {
     return new Promise((resolve) => {
-      if (typeof html2canvas === 'undefined') {
-        resolve(null);
-        return;
+      if (typeof html2canvas !== 'undefined') return resolve(true);
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (typeof html2canvas !== 'undefined') {
+          clearInterval(timer);
+          resolve(true);
+        } else if (Date.now() - started > timeout) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 100);
+    });
+  }
+
+  // iframe 안의 글꼴과 이미지가 실제로 다 준비될 때까지 기다린다(상한 4초).
+  async function waitForFrameAssets(frame) {
+    const doc = frame.contentDocument;
+    if (!doc) return;
+    const tasks = [];
+    if (doc.fonts && doc.fonts.ready) tasks.push(doc.fonts.ready.catch(() => {}));
+    Array.from(doc.images || []).forEach(img => {
+      if (img.complete) return;
+      tasks.push(new Promise(r => {
+        img.addEventListener('load', r, { once: true });
+        img.addEventListener('error', r, { once: true });
+      }));
+    });
+    await Promise.race([Promise.all(tasks), delay(4000)]);
+  }
+
+  // 캡처된 그림이 사실상 빈 화면(거의 한 가지 색)인지 판단한다. 시뮬레이션이 캔버스에
+  // 늦게 그리는 경우, 너무 일찍 찍으면 이렇게 텅 빈 그림이 나온다.
+  function isMostlyBlank(canvas) {
+    const w = canvas.width;
+    const h = canvas.height;
+    if (!w || !h) return true;
+    let data;
+    try {
+      data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+    } catch (err) {
+      return false; // 픽셀을 읽을 수 없으면 판단하지 않고 그대로 사용한다
+    }
+    const stepX = Math.max(1, Math.floor(w / 60));
+    const stepY = Math.max(1, Math.floor(h / 60));
+    let baseR = -1, baseG = 0, baseB = 0, different = 0, total = 0;
+    for (let y = 0; y < h; y += stepY) {
+      for (let x = 0; x < w; x += stepX) {
+        const i = (y * w + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        total++;
+        if (baseR < 0) { baseR = r; baseG = g; baseB = b; continue; }
+        if (Math.abs(r - baseR) > 8 || Math.abs(g - baseG) > 8 || Math.abs(b - baseB) > 8) different++;
       }
+    }
+    return total > 0 && (different / total) < 0.02;
+  }
 
-      const frame = document.createElement('iframe');
-      frame.style.cssText = 'position:fixed; left:-10000px; top:0; width:800px; height:450px; border:0; visibility:hidden;';
-      frame.sandbox = 'allow-scripts allow-same-origin';
-      document.body.appendChild(frame);
+  // 미리보기를 만든다. 예전에는 무조건 900ms만 기다렸다가 한 번 찍어서, 외부 라이브러리를
+  // 불러오거나 캔버스에 늦게 그리는 시뮬레이션은 아직 아무것도 없는 화면이 찍히곤 했다
+  // (= 가끔 미리보기가 안 나오는 원인). 이제는 글꼴/이미지 준비를 기다린 뒤, 찍은 그림이
+  // 비어 있으면 시간을 늘려가며 최대 4번까지 다시 찍는다.
+  async function captureThumbnail(htmlContent, onProgress) {
+    if (!(await waitForHtml2Canvas())) return null;
 
-      let settled = false;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        frame.remove();
-        resolve(result);
-      };
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed; left:-10000px; top:0; width:800px; height:450px; border:0; visibility:hidden;';
+    frame.sandbox = 'allow-scripts allow-same-origin';
+    document.body.appendChild(frame);
 
-      const timeoutId = setTimeout(() => finish(null), 8000);
-
-      frame.addEventListener('load', () => {
-        setTimeout(async () => {
-          try {
-            const doc = frame.contentDocument;
-            const canvas = await html2canvas(doc.documentElement, {
-              width: 800,
-              height: 450,
-              windowWidth: 800,
-              windowHeight: 450,
-              backgroundColor: '#ffffff',
-            });
-            finish(canvas.toDataURL('image/jpeg', 0.72));
-          } catch (err) {
-            finish(null);
-          }
-        }, 900);
+    try {
+      const loaded = new Promise(resolve => {
+        frame.addEventListener('load', resolve, { once: true });
+        setTimeout(resolve, 10000); // 로드 이벤트가 오지 않아도 멈추지 않도록
       });
-
       // blob: URL 대신 srcdoc을 쓴다 — blob URL은 만든 문서(탭)에 묶여 있어서, 뒤로가기/
       // 히스토리 복원 등으로 문서 상태가 재구성될 때 이미 해제(revoke)된 blob을 가리키게 되면
       // 브라우저가 "파일을 찾을 수 없음/삭제됨" 같은 오류를 보여주는 경우가 있었다.
-      // srcdoc은 그런 별도 URL/생명주기가 없어 이 문제 자체가 생기지 않는다.
       frame.srcdoc = htmlContent;
-    });
+      await loaded;
+      await waitForFrameAssets(frame);
+
+      const waits = [500, 1200, 2000, 3000];
+      for (let attempt = 0; attempt < waits.length; attempt++) {
+        if (onProgress) onProgress(attempt + 1, waits.length);
+        await delay(waits[attempt]);
+        try {
+          const doc = frame.contentDocument;
+          if (!doc) return null;
+          const canvas = await html2canvas(doc.documentElement, {
+            width: 800,
+            height: 450,
+            windowWidth: 800,
+            windowHeight: 450,
+            backgroundColor: '#ffffff',
+            scale: 1,        // 고해상도 화면에서 쓸데없이 큰 이미지가 만들어지지 않도록 고정
+            useCORS: true,   // 외부 이미지도 가능하면 제대로 불러온다
+            logging: false,
+          });
+          if (!isMostlyBlank(canvas)) {
+            return canvas.toDataURL('image/jpeg', 0.72);
+          }
+        } catch (err) {
+          console.warn('미리보기 캡처 시도 실패', err);
+        }
+      }
+      return null; // 끝까지 빈 화면이면 카드에 기본 아이콘을 보여준다
+    } finally {
+      frame.remove();
+    }
   }
 
   uploadForm.addEventListener('submit', async (e) => {
@@ -712,8 +809,9 @@
 
       if (hasNewContent) {
         htmlContent = mode === 'file' ? await readFileAsText(htmlFile) : codeText;
-        submitBtn.textContent = '미리보기 생성 중...';
-        thumbnail = await captureThumbnail(htmlContent);
+        thumbnail = await captureThumbnail(htmlContent, (step, total) => {
+          submitBtn.textContent = `미리보기 생성 중... (${step}/${total})`;
+        });
       }
 
       if (editingSimId) {
@@ -742,6 +840,9 @@
         codeInputGroup.hidden = true;
       }
       renderAdminList();
+      if (hasNewContent && !thumbnail) {
+        alert('저장은 완료됐지만 미리보기 이미지를 만들지 못했습니다.\n목록의 "미리보기 다시 만들기" 버튼으로 다시 시도할 수 있습니다.');
+      }
     } catch (err) {
       alert((editingSimId ? '수정' : '업로드') + ' 중 오류가 발생했습니다: ' + err.message);
     } finally {
